@@ -1,6 +1,7 @@
 # Surfaces
-
 [![GitHub Sponsors](https://img.shields.io/github/sponsors/makarov-mm?style=flat&logo=github)](https://github.com/sponsors/makarov-mm)
+[![C++26](https://img.shields.io/badge/dialect-C%2B%2B26-blue)](https://en.cppreference.com/w/cpp/26)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 Six parametric surfaces in one window, rendered with rainbow HSV shading, a live
 wireframe overlay, and Blinn-Phong specular. C++ and OpenGL 3.3. The point is the
