@@ -9,7 +9,8 @@
 #include "math3d.h"
 #include "surfaces.h"
 
-#include <cstdio>
+#include <format>
+#include <string>
 
 #pragma comment(lib, "opengl32.lib")
 #pragma comment(lib, "gdi32.lib")
@@ -177,12 +178,11 @@ static void uploadMesh(App& a) {
 }
 
 static void setTitle(HWND hwnd, App& a) {
-    SurfaceInfo in = surfaceInfo(a.sp.type);
-    char buf[256];
-    std::snprintf(buf, sizeof(buf),
-        "%s  |  hue=%.1f  twist=%.2f  |  1-6: surface   G: grid   Space: spin   F11: fullscreen",
+    const SurfaceInfo in = surfaceInfo(a.sp.type);
+    const std::string title = std::format(
+        "{}  |  hue={:.1f}  twist={:.2f}  |  1-6: surface   G: grid   Space: spin   F11: fullscreen",
         in.name, a.hueScale, a.twist);
-    SetWindowTextA(hwnd, buf);
+    SetWindowTextA(hwnd, title.c_str());
 }
 
 static void toggleFullscreen(HWND hwnd, App& a) {

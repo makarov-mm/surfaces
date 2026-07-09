@@ -5,8 +5,10 @@
 #include <vector>
 #include <string>
 #include <cmath>
+#include <numbers>
+#include <span>
 
-static const float PI = 3.14159265358979323846f;
+inline constexpr float PI = std::numbers::pi_v<float>;
 
 enum class SurfType { TorusKnot, Seashell, Klein, Dini, Breather, Kuen, COUNT };
 
@@ -19,7 +21,7 @@ struct SurfaceInfo {
     float gridU, gridV;   // wireframe line density
 };
 
-inline SurfaceInfo surfaceInfo(SurfType t) {
+[[nodiscard]] inline constexpr SurfaceInfo surfaceInfo(SurfType t) {
     switch (t) {
     case SurfType::TorusKnot: return { "Torus Knot",  760, 44,  0, 3.0f, 0.0f, 190, 12 };
     case SurfType::Seashell:  return { "Seashell",    420, 90,  0, 2.0f, 0.0f,  96, 30 };
@@ -49,7 +51,7 @@ struct MeshData {
 
 // ---- parametric surfaces: u,v in [0,1] -----------------------------------
 
-inline Vec3 evalSeashell(float a, float b) {
+[[nodiscard]] inline constexpr Vec3 evalSeashell(float a, float b) {
     float u = a * 6.0f * PI;               // 0 .. 6pi  (spiral)
     float v = b * 2.0f * PI;               // 0 .. 2pi  (around tube)
     float e = std::exp(u / (6.0f * PI));
@@ -60,7 +62,7 @@ inline Vec3 evalSeashell(float a, float b) {
     return { x, y, z };
 }
 
-inline Vec3 evalKlein(float a, float b) {   // figure-8 immersion
+[[nodiscard]] inline constexpr Vec3 evalKlein(float a, float b) {   // figure-8 immersion
     float u = a * 2.0f * PI, v = b * 2.0f * PI;
     float r = 2.5f;
     float cu2 = std::cos(u * 0.5f), su2 = std::sin(u * 0.5f);
@@ -69,7 +71,7 @@ inline Vec3 evalKlein(float a, float b) {   // figure-8 immersion
     return { f * std::cos(u), f * std::sin(u), su2 * sv + cu2 * s2v };
 }
 
-inline Vec3 evalDini(float a, float b) {    // twisted pseudosphere
+[[nodiscard]] inline constexpr Vec3 evalDini(float a, float b) {    // twisted pseudosphere
     float u = a * 4.0f * PI;
     float v = 0.08f + b * (2.0f - 0.08f);   // stay off the v=0 singularity
     float sv = std::sin(v);
@@ -77,7 +79,7 @@ inline Vec3 evalDini(float a, float b) {    // twisted pseudosphere
     return { std::cos(u) * sv, std::sin(u) * sv, z };
 }
 
-inline Vec3 evalBreather(float a, float b) {
+[[nodiscard]] inline constexpr Vec3 evalBreather(float a, float b) {
     const float bb = 0.4f;
     const float w = std::sqrt(1.0f - bb * bb);
     float u = (a * 2.0f - 1.0f) * 13.2f;
@@ -92,7 +94,7 @@ inline Vec3 evalBreather(float a, float b) {
     return { x, y, z };
 }
 
-inline Vec3 evalKuen(float a, float b) {
+[[nodiscard]] inline constexpr Vec3 evalKuen(float a, float b) {
     float u = (a * 2.0f - 1.0f) * 4.5f;
     float v = 0.05f + b * (PI - 0.12f);
     float su = std::sin(u), cu = std::cos(u), sv = std::sin(v);
@@ -103,7 +105,7 @@ inline Vec3 evalKuen(float a, float b) {
     return { x, y, z };
 }
 
-inline Vec3 evalParam(SurfType t, float u, float v) {
+[[nodiscard]] inline constexpr Vec3 evalParam(SurfType t, float u, float v) {
     switch (t) {
     case SurfType::Seashell: return evalSeashell(u, v);
     case SurfType::Klein:    return evalKlein(u, v);
@@ -115,14 +117,14 @@ inline Vec3 evalParam(SurfType t, float u, float v) {
 }
 
 // (p,q) torus-knot centre curve, t in [0, 2pi]
-inline Vec3 knotCurve(float t, int p, int q) {
+[[nodiscard]] inline constexpr Vec3 knotCurve(float t, int p, int q) {
     float r = std::cos(q * t) + 2.0f;
     return { r * std::cos(p * t), r * std::sin(p * t), -std::sin(q * t) };
 }
 
 // ---- helpers --------------------------------------------------------------
 
-inline void centerAndScale(std::vector<float>& v, float target = 2.6f) {
+inline void centerAndScale(std::span<float> v, float target = 2.6f) {
     if (v.empty()) return;
     float mn[3] = { 1e30f,  1e30f,  1e30f };
     float mx[3] = { -1e30f, -1e30f, -1e30f };
@@ -158,7 +160,7 @@ inline void gridIndices(std::vector<unsigned>& idx, int US, int VS, bool reverse
 
 // ---- main builder ---------------------------------------------------------
 
-inline MeshData buildMesh(const SurfaceParams& sp) {
+[[nodiscard]] inline MeshData buildMesh(const SurfaceParams& sp) {
     MeshData md;
     const int US = std::max(2, sp.uSegs);
     const int VS = std::max(2, sp.vSegs);

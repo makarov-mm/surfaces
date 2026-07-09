@@ -32,31 +32,28 @@ look, not mathematical depth: switch surfaces, spin them, tweak the colours.
   parametric map for the rest.
 
 Adding a surface is one `evalX(u, v)` function in `src/surfaces.h` plus an entry in
-the enum, `surfaceInfo()`, `evalParam()`, and one key case in the platform layer.
-`src/surfaces.h` and `src/math3d.h` are shared by both builds below.
+the enum, `surfaceInfo()`, `evalParam()`, and one key case in `src/main_win32.cpp`.
+
+The math layer (`src/math3d.h` and the surface eval in `src/surfaces.h`) is
+`constexpr` and `[[nodiscard]]` throughout, with compile-time `static_assert`
+checks on the algebraic primitives. It builds as C++26 (`/std:c++latest`); the
+`<cmath>`-based helpers stay `constexpr` via relaxed constexpr (P2448) and become
+constant-evaluable once the toolchain ships constexpr `<cmath>` (P1383), with no
+source change.
 
 ## Build
 
-### Visual Studio (Windows, no dependencies)
+Open `Surfaces.slnx` in Visual Studio, pick `Release | x64`, build and run. Links
+only the system `opengl32` / `gdi32` / `user32`. The window and GL 3.3 core context
+are created directly with Win32 + WGL (`src/main_win32.cpp`); the GL loader (glad)
+is vendored under `extern/glad`, so there is nothing to install, no vcpkg and no
+NuGet.
 
-Open `Surfaces.sln`, pick `Release | x64`, build and run. Links only the system
-`opengl32` / `gdi32` / `user32`. The window and GL 3.3 core context are created
-directly with Win32 + WGL (`src/main_win32.cpp`); the GL loader (glad) is vendored
-under `extern/glad`, so there is nothing to install, no vcpkg and no NuGet.
-
-Toolset is `v143`. On VS 2019 retarget to `v142` when prompted.
-
-### CMake (Windows, Linux, macOS)
-
-```
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release
-./build/surfaces
-```
-
-This build uses GLFW (`src/main.cpp`); CMake fetches GLFW and glad with
-`FetchContent`, so no manual setup is needed. macOS caps at OpenGL 4.1 but 3.3
-core runs fine.
+Built as C++26 (`/std:c++latest`) with the `v145` toolset (Visual Studio 2026).
+On an older Visual Studio, retarget the platform toolset when prompted; the code
+itself only relies on library features available up to C++23 (`std::format`,
+`std::span`, `std::numbers`, relaxed constexpr), so `/std:c++latest` on VS 2022
+17.x works too.
 
 ## Controls
 
@@ -77,13 +74,11 @@ core runs fine.
 ## Layout
 
 ```
-Surfaces.sln / Surfaces.vcxproj   Visual Studio project (Win32 + WGL build)
-CMakeLists.txt                    CMake project (GLFW build)
-src/main_win32.cpp                Win32 + WGL platform layer
-src/main.cpp                      GLFW platform layer
-src/surfaces.h                    surface eval + mesh generation (shared, no GL)
-src/math3d.h                      small vec3 / mat4 (shared, no dependencies)
-extern/glad/                      vendored OpenGL 3.3 core loader
+Surfaces.slnx / Surfaces.vcxproj   Visual Studio project (Win32 + WGL)
+src/main_win32.cpp                 Win32 + WGL platform layer
+src/surfaces.h                     surface eval + mesh generation (no GL)
+src/math3d.h                       small constexpr vec3 / mat4 (no dependencies)
+extern/glad/                       vendored OpenGL 3.3 core loader
 ```
 
 ## License
