@@ -328,7 +328,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow)
     RegisterClassA(&wc);
 
     App app;
-    RECT r = { 0, 0, 960, 960 };
+    RECT r = { 0, 0, 1920, 1080 };
     AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
     HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "Surfaces",
         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
