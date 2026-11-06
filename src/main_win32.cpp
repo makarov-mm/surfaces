@@ -1,505 +1,334 @@
-// main_win32.cpp - spectacular parametric surfaces, Win32 + WGL, OpenGL 3.3 core.
-// Zero external dependencies: only opengl32 / gdi32 / user32 (all system libs).
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#include <windowsx.h>
-#include <glad/gl.h>
-
-#include "math3d.h"
+// main_win32.cpp - the window, input and the frame loop. Win32 + WGL, OpenGL 3.3 core.
+#include "gl_context.h"
+#include "renderer.h"
 #include "surfaces.h"
 
+#include <windowsx.h>
+
+#include <algorithm>
+#include <chrono>
+#include <exception>
 #include <format>
 #include <string>
+#include <string_view>
 
-#pragma comment(lib, "opengl32.lib")
-#pragma comment(lib, "gdi32.lib")
-#pragma comment(lib, "user32.lib")
+namespace {
 
-// WGL glue
-typedef HGLRC(WINAPI* PFNWGLCREATECONTEXTATTRIBSARBPROC)(HDC, HGLRC, const int*);
-typedef BOOL (WINAPI* PFNWGLCHOOSEPIXELFORMATARBPROC)(HDC, const int*, const FLOAT*, UINT, int*, UINT*);
-typedef BOOL (WINAPI* PFNWGLSWAPINTERVALEXTPROC)(int);
+constexpr int   kClientWidth  = 1920;     // the initial client area in 96-dpi units,
+constexpr int   kClientHeight = 1080;     // scaled down when it doesn't fit the screen
+constexpr float kSpinSpeed    = 0.35f;    // auto-rotation, radians per second
+constexpr float kDragSpeed    = 0.006f;   // radians per pixel
+constexpr float kMaxPitch     = 1.55f;
+constexpr float kMinDistance  = 1.5f;
+constexpr float kMaxDistance  = 12.0f;
 
-#define WGL_DRAW_TO_WINDOW_ARB                 0x2001
-#define WGL_SUPPORT_OPENGL_ARB                 0x2010
-#define WGL_DOUBLE_BUFFER_ARB                  0x2011
-#define WGL_PIXEL_TYPE_ARB                     0x2013
-#define WGL_TYPE_RGBA_ARB                      0x202B
-#define WGL_COLOR_BITS_ARB                     0x2014
-#define WGL_DEPTH_BITS_ARB                     0x2022
-#define WGL_STENCIL_BITS_ARB                   0x2023
-#define WGL_SAMPLE_BUFFERS_ARB                 0x2041
-#define WGL_SAMPLES_ARB                        0x2042
-#define WGL_CONTEXT_MAJOR_VERSION_ARB          0x2091
-#define WGL_CONTEXT_MINOR_VERSION_ARB          0x2092
-#define WGL_CONTEXT_FLAGS_ARB                  0x2094
-#define WGL_CONTEXT_PROFILE_MASK_ARB           0x9126
-#define WGL_CONTEXT_CORE_PROFILE_BIT_ARB       0x00000001
-#define WGL_CONTEXT_FORWARD_COMPATIBLE_BIT_ARB 0x00000002
-
-static PFNWGLCREATECONTEXTATTRIBSARBPROC wglCreateContextAttribsARB = nullptr;
-static PFNWGLCHOOSEPIXELFORMATARBPROC    wglChoosePixelFormatARB    = nullptr;
-static PFNWGLSWAPINTERVALEXTPROC         wglSwapIntervalEXT         = nullptr;
-
-static HMODULE g_opengl32 = nullptr;
-
-static GLADapiproc glLoader(const char* name)
-{
-    PROC p = wglGetProcAddress(name);
-
-    if (p == nullptr || p == (PROC)1 || p == (PROC)2 || p == (PROC)3 || p == (PROC)-1)
-        p = g_opengl32 ? GetProcAddress(g_opengl32, name) : nullptr;
-
-    return (GLADapiproc)p;
-}
-
-static const char* VERT = R"(#version 330 core
-layout(location=0) in vec3 aPos;
-layout(location=1) in vec3 aNormal;
-layout(location=2) in vec2 aUV;
-uniform mat4 uModel, uView, uProj;
-uniform mat3 uNormalMat;
-out vec3 vViewPos;
-out vec3 vViewNormal;
-out vec2 vUV;
-void main(){
-    vec4 vp = uView * uModel * vec4(aPos, 1.0);
-    vViewPos    = vp.xyz;
-    vViewNormal = uNormalMat * aNormal;
-    vUV         = aUV;
-    gl_Position = uProj * vp;
-}
-)";
-
-static const char* FRAG = R"(#version 330 core
-in vec3 vViewPos;
-in vec3 vViewNormal;
-in vec2 vUV;
-out vec4 FragColor;
-uniform int   uHueAxis;
-uniform float uHueScale;
-uniform float uTwist;
-uniform float uGridU, uGridV;
-uniform int   uWire;
-uniform float uWireStrength;
-uniform float uSat, uVal;
-uniform float uAmbient, uSpecStrength, uShininess;
-uniform vec3  uLightDir;
-vec3 hsv2rgb(vec3 c){
-    vec3 p = abs(fract(c.xxx + vec3(0.0, 2.0/3.0, 1.0/3.0)) * 6.0 - 3.0);
-    return c.z * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), c.y);
-}
-void main(){
-    vec3 N = normalize(vViewNormal);
-    if(!gl_FrontFacing) N = -N;
-    vec3 L = normalize(uLightDir);
-    vec3 V = normalize(-vViewPos);
-    vec3 H = normalize(L + V);
-    float diff = max(dot(N, L), 0.0);
-    float spec = pow(max(dot(N, H), 0.0), uShininess);
-    float hueBase = (uHueAxis == 0) ? vUV.x : vUV.y;
-    float other   = (uHueAxis == 0) ? vUV.y : vUV.x;
-    float hue = fract(hueBase * uHueScale + uTwist * other);
-    vec3 albedo = hsv2rgb(vec3(hue, uSat, uVal));
-    vec3 color = albedo * (uAmbient + diff) + vec3(1.0) * spec * uSpecStrength;
-    if(uWire == 1){
-        vec2 g  = vec2(vUV.x * uGridU, vUV.y * uGridV);
-        vec2 gr = abs(fract(g - 0.5) - 0.5) / fwidth(g);
-        float line = min(gr.x, gr.y);
-        float w = 1.0 - clamp(line, 0.0, 1.0);
-        color = mix(color, vec3(0.015), w * uWireStrength);
-    }
-    FragColor = vec4(color, 1.0);
-}
-)";
-
-// ---------------------------------------------------------------- app state
 struct App {
-    int   hueAxis = 0;
-    float hueScale = 3.0f;
-    float twist = 0.0f;
-    float gridU = 190.0f, gridV = 12.0f;
-    bool  wire = true;
+    Surface    surface = Surface::TorusKnot;
+    KnotParams knot;
+    Style      style;
+    Camera     camera;
+    bool       autoRotate = true;
+    bool       meshStale  = true;
 
-    SurfaceParams sp;
-    bool dirty = false;
-    int  indexCount = 0;
-
-    float yaw = 0.6f, pitch = 0.35f;
-    float dist = 4.3f;
-    bool  autoRotate = true;
     bool  dragging = false;
-    int   lastX = 0, lastY = 0;
+    POINT lastMouse{};
 
-    bool  fullscreen = false;
-    RECT  savedRect{};
-    DWORD savedStyle = 0;
-    bool  running = true;
+    bool            fullscreen = false;
+    WINDOWPLACEMENT windowed{};   // restored when leaving fullscreen
+
+    bool running = true;
 };
 
-static void loadSurfaceDefaults(App& a, SurfType t) {
-    SurfaceInfo in = surfaceInfo(t);
-    a.sp.type = t; a.sp.uSegs = in.uSegs; a.sp.vSegs = in.vSegs;
-    a.hueAxis = in.hueAxis; a.hueScale = in.hueScale; a.twist = in.twist;
-    a.gridU = in.gridU; a.gridV = in.gridV;
-    a.dirty = true;
+// Switches the surface and resets its colouring; the wireframe toggle stays as it is.
+void selectSurface(App& app, Surface surface) {
+    const SurfaceInfo info = surfaceInfo(surface);
+    app.surface        = surface;
+    app.style.hueAxis  = info.hueAxis;
+    app.style.hueScale = info.hueScale;
+    app.style.twist    = info.twist;
+    app.style.gridU    = info.gridU;
+    app.style.gridV    = info.gridV;
+    app.meshStale      = true;
 }
 
-// ---------------------------------------------------------------- gl helpers
-static GLuint compile(GLenum type, const char* src) {
-    GLuint s = glCreateShader(type);
-    glShaderSource(s, 1, &src, nullptr);
-    glCompileShader(s);
-    GLint ok = 0; glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
-    if (!ok) { char log[2048]; glGetShaderInfoLog(s, sizeof(log), nullptr, log); OutputDebugStringA(log); }
-    return s;
-}
-static GLuint linkProgram() {
-    GLuint vs = compile(GL_VERTEX_SHADER, VERT), fs = compile(GL_FRAGMENT_SHADER, FRAG);
-    GLuint p = glCreateProgram();
-    glAttachShader(p, vs); glAttachShader(p, fs); glLinkProgram(p);
-    GLint ok = 0; glGetProgramiv(p, GL_LINK_STATUS, &ok);
-    if (!ok) { char log[2048]; glGetProgramInfoLog(p, sizeof(log), nullptr, log); OutputDebugStringA(log); }
-    glDeleteShader(vs); glDeleteShader(fs);
-    return p;
+void updateTitle(HWND window, const App& app) {
+    const std::string_view name = surfaceInfo(app.surface).name;   // ASCII
+    std::wstring title = std::format(L"{}  |  hue={:.1f}  twist={:.2f}", std::wstring(name.begin(), name.end()),
+                                     app.style.hueScale, app.style.twist);
+    if (app.surface == Surface::TorusKnot)
+        title += std::format(L"  p={} q={} tube={:.2f}", app.knot.p, app.knot.q, app.knot.tubeRadius);
+    title += L"  |  1-6: surface   G: grid   Space: spin   F11: fullscreen";
+    SetWindowTextW(window, title.c_str());
 }
 
-static GLuint gVAO = 0, gVBO = 0, gEBO = 0;
-
-static void uploadMesh(App& a) {
-    MeshData m = buildMesh(a.sp);
-    a.indexCount = (int)m.idx.size();
-    glBindVertexArray(gVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, gVBO);
-    glBufferData(GL_ARRAY_BUFFER, m.verts.size() * sizeof(float), m.verts.data(), GL_STATIC_DRAW);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gEBO);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, m.idx.size() * sizeof(unsigned), m.idx.data(), GL_STATIC_DRAW);
-}
-
-static void setTitle(HWND hwnd, App& a) {
-    const SurfaceInfo in = surfaceInfo(a.sp.type);
-    const std::string title = std::format(
-        "{}  |  hue={:.1f}  twist={:.2f}  |  1-6: surface   G: grid   Space: spin   F11: fullscreen",
-        in.name, a.hueScale, a.twist);
-    SetWindowTextA(hwnd, title.c_str());
-}
-
-static void toggleFullscreen(HWND hwnd, App& a) {
-    if (!a.fullscreen) {
-        a.savedStyle = GetWindowLongA(hwnd, GWL_STYLE);
-        GetWindowRect(hwnd, &a.savedRect);
-        MONITORINFO mi = { sizeof(mi) };
-        GetMonitorInfoA(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi);
-        SetWindowLongA(hwnd, GWL_STYLE, a.savedStyle & ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU));
-        SetWindowPos(hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
-            mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
-            SWP_FRAMECHANGED | SWP_SHOWWINDOW);
-        a.fullscreen = true;
+// A borderless window over the whole monitor, and back to the saved placement
+// (position, size and maximized state).
+void toggleFullscreen(HWND window, App& app) {
+    const LONG_PTR style = GetWindowLongPtrW(window, GWL_STYLE);
+    if (!app.fullscreen) {
+        MONITORINFO monitor{};
+        monitor.cbSize      = sizeof(monitor);
+        app.windowed.length = sizeof(app.windowed);
+        if (!GetWindowPlacement(window, &app.windowed) ||
+            !GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &monitor))
+            return;
+        SetWindowLongPtrW(window, GWL_STYLE, style & ~static_cast<LONG_PTR>(WS_OVERLAPPEDWINDOW));
+        const RECT& area = monitor.rcMonitor;
+        SetWindowPos(window, HWND_TOP, area.left, area.top, area.right - area.left, area.bottom - area.top,
+                     SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
     } else {
-        SetWindowLongA(hwnd, GWL_STYLE, a.savedStyle);
-        SetWindowPos(hwnd, HWND_TOP, a.savedRect.left, a.savedRect.top,
-            a.savedRect.right - a.savedRect.left, a.savedRect.bottom - a.savedRect.top,
-            SWP_FRAMECHANGED | SWP_SHOWWINDOW);
-        a.fullscreen = false;
+        SetWindowLongPtrW(window, GWL_STYLE, style | WS_OVERLAPPEDWINDOW);
+        SetWindowPlacement(window, &app.windowed);
+        SetWindowPos(window, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    }
+    app.fullscreen = !app.fullscreen;
+}
+
+// Keys by function or position: Esc, Space, F11, letters, digits, arrows.
+// Returns whether the title changes.
+bool onKeyDown(HWND window, App& app, WPARAM key) {
+    switch (key) {
+    case VK_ESCAPE:
+        app.running = false;
+        return false;
+    case VK_SPACE:
+        app.autoRotate = !app.autoRotate;
+        return false;
+    case 'G':
+        app.style.wireframe = !app.style.wireframe;
+        return false;
+    case VK_F11:
+        toggleFullscreen(window, app);
+        return false;
+    case 'R':   // view, knot shape and colouring back to the defaults
+        app.camera = {};
+        app.knot   = {};
+        selectSurface(app, app.surface);
+        return true;
+    case VK_LEFT:
+    case VK_RIGHT:
+    case VK_DOWN:
+    case VK_UP: {   // torus knot: left/right change p, down/up change q
+        if (app.surface != Surface::TorusKnot)
+            return false;
+        int& turns = (key == VK_LEFT || key == VK_RIGHT) ? app.knot.p : app.knot.q;
+        const int step  = (key == VK_RIGHT || key == VK_UP) ? 1 : -1;
+        const int value = std::clamp(turns + step, 1, kMaxKnotTurns);
+        if (value == turns)
+            return false;
+        turns         = value;
+        app.meshStale = true;
+        return true;
+    }
+    default:
+        break;
+    }
+
+    // 1 - 6 on the main keyboard or the number pad.
+    int digit = -1;
+    if (key >= '1' && key <= '9')
+        digit = static_cast<int>(key - '1');
+    else if (key >= VK_NUMPAD1 && key <= VK_NUMPAD9)
+        digit = static_cast<int>(key - VK_NUMPAD1);
+    if (digit < 0 || digit >= kSurfaceCount)
+        return false;
+    selectSurface(app, static_cast<Surface>(digit));
+    return true;
+}
+
+// Keys by the character they type, so that they work with any keyboard layout.
+// Returns whether the title changes.
+bool onChar(App& app, wchar_t character) {
+    switch (character) {
+    case L'[':
+        app.style.twist -= 0.05f;
+        return true;
+    case L']':
+        app.style.twist += 0.05f;
+        return true;
+    case L'-':
+        app.style.hueScale = std::max(0.2f, app.style.hueScale - 0.2f);
+        return true;
+    case L'=':
+    case L'+':
+        app.style.hueScale += 0.2f;
+        return true;
+    case L';':
+    case L'\'':
+        if (app.surface != Surface::TorusKnot)
+            return false;
+        app.knot.tubeRadius = character == L';' ? std::max(0.05f, app.knot.tubeRadius - 0.05f)
+                                                : app.knot.tubeRadius + 0.05f;
+        app.meshStale = true;
+        return true;
+    default:
+        return false;
     }
 }
 
-static void handleKey(HWND hwnd, App& a, WPARAM key) {
-    switch (key) {
-        case VK_ESCAPE: a.running = false; break;
-        case VK_SPACE:  a.autoRotate = !a.autoRotate; break;
-        case 'G':       a.wire = !a.wire; break;
-        case VK_F11:    toggleFullscreen(hwnd, a); break;
+LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == WM_NCCREATE) {   // CreateWindowExW passes the App along
+        const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
+        SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+    }
+    auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (!app)
+        return DefWindowProcW(window, message, wParam, lParam);
 
-        case '1': loadSurfaceDefaults(a, SurfType::TorusKnot); break;
-        case '2': loadSurfaceDefaults(a, SurfType::Seashell);  break;
-        case '3': loadSurfaceDefaults(a, SurfType::Klein);     break;
-        case '4': loadSurfaceDefaults(a, SurfType::Dini);      break;
-        case '5': loadSurfaceDefaults(a, SurfType::Breather);  break;
-        case '6': loadSurfaceDefaults(a, SurfType::Kuen);      break;
+    switch (message) {
+    case WM_CLOSE:   // the frame loop ends, then wWinMain destroys the window
+        app->running = false;
+        return 0;
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+    case WM_KEYDOWN:
+        if (onKeyDown(window, *app, wParam))
+            updateTitle(window, *app);
+        return 0;
+    case WM_CHAR:
+        if (onChar(*app, static_cast<wchar_t>(wParam)))
+            updateTitle(window, *app);
+        return 0;
+    case WM_LBUTTONDOWN:
+        app->dragging  = true;
+        app->lastMouse = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        SetCapture(window);
+        return 0;
+    case WM_LBUTTONUP:
+        ReleaseCapture();   // WM_CAPTURECHANGED ends the drag
+        return 0;
+    case WM_CAPTURECHANGED:   // also when another window takes the mouse away
+        app->dragging = false;
+        return 0;
+    case WM_MOUSEMOVE:
+        if (app->dragging) {
+            const POINT mouse{ GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            Camera& camera = app->camera;
+            camera.yaw  += static_cast<float>(mouse.x - app->lastMouse.x) * kDragSpeed;
+            camera.pitch = std::clamp(camera.pitch + static_cast<float>(mouse.y - app->lastMouse.y) * kDragSpeed,
+                                      -kMaxPitch, kMaxPitch);
+            app->lastMouse = mouse;
+        }
+        return 0;
+    case WM_MOUSEWHEEL: {
+        const float notches = static_cast<float>(GET_WHEEL_DELTA_WPARAM(wParam)) / WHEEL_DELTA;
+        app->camera.distance = std::clamp(app->camera.distance * (1.0f - notches * 0.08f), kMinDistance, kMaxDistance);
+        return 0;
+    }
+    case WM_DPICHANGED: {   // moved to a monitor with another scale: take the size Windows suggests
+        const RECT& suggested = *reinterpret_cast<const RECT*>(lParam);
+        SetWindowPos(window, nullptr, suggested.left, suggested.top, suggested.right - suggested.left,
+                     suggested.bottom - suggested.top, SWP_NOZORDER | SWP_NOACTIVATE);
+        return 0;
+    }
+    default:
+        return DefWindowProcW(window, message, wParam, lParam);
+    }
+}
 
-        case VK_OEM_4:     a.twist -= 0.05f; break;                        // [
-        case VK_OEM_6:     a.twist += 0.05f; break;                        // ]
-        case VK_OEM_MINUS: a.hueScale = (a.hueScale > 0.4f) ? a.hueScale - 0.2f : 0.2f; break;
-        case VK_OEM_PLUS:  a.hueScale += 0.2f; break;
+// The window for a kClientWidth x kClientHeight client area at the monitor's scale,
+// shrunk to fit the work area of the primary monitor and centered on it.
+RECT initialWindowRect(DWORD style) {
+    MONITORINFO monitor{};
+    monitor.cbSize = sizeof(monitor);
+    GetMonitorInfoW(MonitorFromPoint({ 0, 0 }, MONITOR_DEFAULTTOPRIMARY), &monitor);
+    const RECT& work  = monitor.rcWork;
+    const UINT  dpi   = GetDpiForSystem();
 
-        case 'R':
-            a.yaw = 0.6f; a.pitch = 0.35f; a.dist = 4.3f;
-            loadSurfaceDefaults(a, a.sp.type);
+    RECT frame{};   // borders and title bar around an empty client area
+    AdjustWindowRectExForDpi(&frame, style, FALSE, 0, dpi);
+    const int frameWidth  = frame.right - frame.left;
+    const int frameHeight = frame.bottom - frame.top;
+
+    const double scale = std::max(0.25, std::min({ dpi / 96.0,
+        static_cast<double>(work.right - work.left - frameWidth) / kClientWidth,
+        static_cast<double>(work.bottom - work.top - frameHeight) / kClientHeight }));
+    const int width  = static_cast<int>(kClientWidth * scale) + frameWidth;
+    const int height = static_cast<int>(kClientHeight * scale) + frameHeight;
+    const int left   = work.left + (work.right - work.left - width) / 2;
+    const int top    = work.top + (work.bottom - work.top - height) / 2;
+    return { left, top, left + width, top + height };
+}
+
+void runFrameLoop(HWND window, App& app, const GlContext& gl, SurfaceRenderer& renderer) {
+    using Clock = std::chrono::steady_clock;
+    auto previous = Clock::now();
+
+    while (app.running) {
+        MSG message;
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+            if (message.message == WM_QUIT)
+                app.running = false;
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+        if (!app.running)
             break;
 
-        case VK_LEFT:  if (a.sp.type == SurfType::TorusKnot) { if (a.sp.p > 1) a.sp.p--; a.dirty = true; } break;
-        case VK_RIGHT: if (a.sp.type == SurfType::TorusKnot) { a.sp.p++; a.dirty = true; } break;
-        case VK_DOWN:  if (a.sp.type == SurfType::TorusKnot) { if (a.sp.q > 1) a.sp.q--; a.dirty = true; } break;
-        case VK_UP:    if (a.sp.type == SurfType::TorusKnot) { a.sp.q++; a.dirty = true; } break;
-        case VK_OEM_1: if (a.sp.type == SurfType::TorusKnot) { a.sp.tubeRadius = (a.sp.tubeRadius > 0.1f) ? a.sp.tubeRadius - 0.05f : 0.05f; a.dirty = true; } break; // ;
-        case VK_OEM_7: if (a.sp.type == SurfType::TorusKnot) { a.sp.tubeRadius += 0.05f; a.dirty = true; } break; // '
-        default: return;
+        RECT client;
+        GetClientRect(window, &client);
+        if (IsIconic(window) || client.right <= 0 || client.bottom <= 0) {
+            WaitMessage();   // nothing to draw: sleep until something happens
+            previous = Clock::now();
+            continue;
+        }
+
+        // Capped, so that the spin doesn't jump after a stall (the window being dragged, say).
+        const auto now = Clock::now();
+        const float dt = std::min(std::chrono::duration<float>(now - previous).count(), 0.1f);
+        previous = now;
+
+        if (app.meshStale) {
+            renderer.upload(buildMesh(app.surface, app.knot));
+            app.meshStale = false;
+        }
+        if (app.autoRotate)
+            app.camera.yaw += dt * kSpinSpeed;
+
+        renderer.render(client.right, client.bottom, app.camera, app.style);
+        gl.swapBuffers();
     }
-    setTitle(hwnd, a);
 }
 
-static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    App* a = reinterpret_cast<App*>(GetWindowLongPtrA(hwnd, GWLP_USERDATA));
-    switch (msg) {
-        case WM_CLOSE:   if (a) a->running = false; return 0;
-        case WM_DESTROY: PostQuitMessage(0); return 0;
-        case WM_KEYDOWN: if (a) handleKey(hwnd, *a, wp); return 0;
-        case WM_LBUTTONDOWN:
-            if (a) { a->dragging = true; a->lastX = GET_X_LPARAM(lp); a->lastY = GET_Y_LPARAM(lp); SetCapture(hwnd); }
-            return 0;
-        case WM_LBUTTONUP:
-            if (a) { a->dragging = false; ReleaseCapture(); }
-            return 0;
-        case WM_MOUSEMOVE:
-            if (a && a->dragging) {
-                int x = GET_X_LPARAM(lp), y = GET_Y_LPARAM(lp);
-                a->yaw   += (x - a->lastX) * 0.006f;
-                a->pitch += (y - a->lastY) * 0.006f;
-                const float lim = 1.55f;
-                if (a->pitch >  lim) a->pitch =  lim;
-                if (a->pitch < -lim) a->pitch = -lim;
-                a->lastX = x; a->lastY = y;
-            }
-            return 0;
-        case WM_MOUSEWHEEL:
-            if (a) {
-                float d = (float)GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
-                a->dist *= (1.0f - d * 0.08f);
-                if (a->dist < 1.5f)  a->dist = 1.5f;
-                if (a->dist > 12.0f) a->dist = 12.0f;
-            }
-            return 0;
-    }
-    return DefWindowProcA(hwnd, msg, wp, lp);
-}
+} // namespace
 
-// WGL setup
-static void loadWglExtensions()
-{
-    // A dummy window/context is required to query the ARB entry points.
-    WNDCLASSA wc = {};
-    wc.lpfnWndProc = DefWindowProcA;
-    wc.hInstance = GetModuleHandleA(nullptr);
-    wc.lpszClassName = "SurfacesDummyWGL";
-    RegisterClassA(&wc);
-    HWND dummy = CreateWindowExA(0, wc.lpszClassName, "dummy", 0,
-        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, nullptr, nullptr, wc.hInstance, nullptr);
-    HDC dc = GetDC(dummy);
-
-    PIXELFORMATDESCRIPTOR pfd = {};
-    pfd.nSize = sizeof(pfd);
-	pfd.nVersion = 1;
-    pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
-    pfd.iPixelType = PFD_TYPE_RGBA;
-	pfd.cColorBits = 32;
-	pfd.cDepthBits = 24;
-	pfd.cStencilBits = 8;
-
-    int pf = ChoosePixelFormat(dc, &pfd);
-    SetPixelFormat(dc, pf, &pfd);
-
-    HGLRC rc = wglCreateContext(dc);
-    wglMakeCurrent(dc, rc);
-
-    wglCreateContextAttribsARB = (PFNWGLCREATECONTEXTATTRIBSARBPROC)wglGetProcAddress("wglCreateContextAttribsARB");
-    wglChoosePixelFormatARB    = (PFNWGLCHOOSEPIXELFORMATARBPROC)wglGetProcAddress("wglChoosePixelFormatARB");
-    wglSwapIntervalEXT         = (PFNWGLSWAPINTERVALEXTPROC)wglGetProcAddress("wglSwapIntervalEXT");
-
-    wglMakeCurrent(nullptr, nullptr);
-    wglDeleteContext(rc);
-    ReleaseDC(dummy, dc);
-    DestroyWindow(dummy);
-    UnregisterClassA(wc.lpszClassName, wc.hInstance);
-}
-
-int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow)
-{
-    g_opengl32 = LoadLibraryA("opengl32.dll");
-    loadWglExtensions();
-
-    WNDCLASSA wc = {};
-    wc.style = CS_OWNDC;
-    wc.lpfnWndProc = WndProc;
-    wc.hInstance = hInst;
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.lpszClassName = "SurfacesWindow";
-    RegisterClassA(&wc);
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
+    // Render at the monitor's real resolution instead of being scaled up by Windows.
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     App app;
-    RECT r = { 0, 0, 1920, 1080 };
-    AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-    HWND hwnd = CreateWindowExA(0, wc.lpszClassName, "Surfaces",
-        WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
-        r.right - r.left, r.bottom - r.top, nullptr, nullptr, hInst, nullptr);
-    SetWindowLongPtrA(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(&app));
+    selectSurface(app, Surface::TorusKnot);
 
-    HDC dc = GetDC(hwnd);
+    WNDCLASSW windowClass{};
+    windowClass.style         = CS_OWNDC;   // OpenGL keeps using the window's device context
+    windowClass.lpfnWndProc   = windowProc;
+    windowClass.hInstance     = instance;
+    windowClass.hCursor       = LoadCursorW(nullptr, IDC_ARROW);
+    windowClass.lpszClassName = L"SurfacesWindow";
+    RegisterClassW(&windowClass);
 
-    // Multisampled RGBA pixel format via the ARB path.
-    const int pfAttribs[] = {
-        WGL_DRAW_TO_WINDOW_ARB, GL_TRUE,
-        WGL_SUPPORT_OPENGL_ARB, GL_TRUE,
-        WGL_DOUBLE_BUFFER_ARB,  GL_TRUE,
-        WGL_PIXEL_TYPE_ARB,     WGL_TYPE_RGBA_ARB,
-        WGL_COLOR_BITS_ARB,     32,
-        WGL_DEPTH_BITS_ARB,     24,
-        WGL_STENCIL_BITS_ARB,   8,
-        WGL_SAMPLE_BUFFERS_ARB, 1,
-        WGL_SAMPLES_ARB,        4,
-        0
-    };
-
-    int pf;
-	UINT numFormats = 0;
-
-    if (wglChoosePixelFormatARB && wglChoosePixelFormatARB(dc, pfAttribs, nullptr, 1, &pf, &numFormats) && numFormats)
-    {
-        PIXELFORMATDESCRIPTOR pfd = {}; pfd.nSize = sizeof(pfd); pfd.nVersion = 1;
-        DescribePixelFormat(dc, pf, sizeof(pfd), &pfd);
-        SetPixelFormat(dc, pf, &pfd);
-    } 
-	else 
-		{
-        PIXELFORMATDESCRIPTOR pfd = {};
-		pfd.nSize = sizeof(pfd);
-		pfd.nVersion = 1;
-        pfd.dwFlags = PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER;
-        pfd.iPixelType = PFD_TYPE_RGBA;
-		pfd.cColorBits = 32;
-		pfd.cDepthBits = 24;
-		pfd.cStencilBits = 8;
-        int fallback = ChoosePixelFormat(dc, &pfd);
-        SetPixelFormat(dc, fallback, &pfd);
-    }
-
-    const int ctxAttribs[] = {
-        WGL_CONTEXT_MAJOR_VERSION_ARB, 3,
-        WGL_CONTEXT_MINOR_VERSION_ARB, 3,
-        WGL_CONTEXT_PROFILE_MASK_ARB,  WGL_CONTEXT_CORE_PROFILE_BIT_ARB,
-        WGL_CONTEXT_FLAGS_ARB,         WGL_CONTEXT_FORWARD_COMPATIBLE_BIT_ARB,
-        0
-    };
-
-    HGLRC rc = wglCreateContextAttribsARB
-        ? wglCreateContextAttribsARB(dc, nullptr, ctxAttribs)
-        : wglCreateContext(dc);
-
-    wglMakeCurrent(dc, rc);
-
-    if (!gladLoadGL(glLoader)) 
-    {
-        MessageBoxA(hwnd, "Failed to load OpenGL 3.3 functions.", "Surfaces", MB_ICONERROR);
+    constexpr DWORD style = WS_OVERLAPPEDWINDOW;
+    const RECT rect = initialWindowRect(style);
+    const HWND window = CreateWindowExW(0, windowClass.lpszClassName, L"Surfaces", style, rect.left, rect.top,
+                                        rect.right - rect.left, rect.bottom - rect.top, nullptr, nullptr, instance, &app);
+    if (!window) {
+        MessageBoxW(nullptr, L"Could not create the window.", L"Surfaces", MB_ICONERROR);
         return 1;
     }
 
-    if (wglSwapIntervalEXT) wglSwapIntervalEXT(1); // vsync
-
-    GLuint prog = linkProgram();
-
-    glGenVertexArrays(1, &gVAO);
-    glGenBuffers(1, &gVBO);
-    glGenBuffers(1, &gEBO);
-    glBindVertexArray(gVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, gVBO);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gEBO);
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
-    glEnableVertexAttribArray(0);
-    glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
-    glEnableVertexAttribArray(2);
-
-    loadSurfaceDefaults(app, SurfType::TorusKnot);
-    uploadMesh(app);
-    app.dirty = false;
-
-    glEnable(GL_DEPTH_TEST);
-    glEnable(GL_MULTISAMPLE);
-    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-
-    glUseProgram(prog);
-    GLint uModel   = glGetUniformLocation(prog, "uModel");
-    GLint uView    = glGetUniformLocation(prog, "uView");
-    GLint uProj    = glGetUniformLocation(prog, "uProj");
-    GLint uNMat    = glGetUniformLocation(prog, "uNormalMat");
-    GLint uHueAxis = glGetUniformLocation(prog, "uHueAxis");
-    GLint uHueScl  = glGetUniformLocation(prog, "uHueScale");
-    GLint uTwist   = glGetUniformLocation(prog, "uTwist");
-    GLint uGridU   = glGetUniformLocation(prog, "uGridU");
-    GLint uGridV   = glGetUniformLocation(prog, "uGridV");
-    GLint uWire    = glGetUniformLocation(prog, "uWire");
-    glUniform1f(glGetUniformLocation(prog, "uWireStrength"), 0.85f);
-    glUniform1f(glGetUniformLocation(prog, "uSat"), 0.95f);
-    glUniform1f(glGetUniformLocation(prog, "uVal"), 1.0f);
-    glUniform1f(glGetUniformLocation(prog, "uAmbient"), 0.18f);
-    glUniform1f(glGetUniformLocation(prog, "uSpecStrength"), 0.7f);
-    glUniform1f(glGetUniformLocation(prog, "uShininess"), 48.0f);
-    Vec3 ld = normalize(Vec3(0.35f, 0.55f, 0.80f));
-    glUniform3f(glGetUniformLocation(prog, "uLightDir"), ld.x, ld.y, ld.z);
-
-    ShowWindow(hwnd, nShow);
-    setTitle(hwnd, app);
-
-    LARGE_INTEGER freq, prev;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&prev);
-
-    while (app.running)
-    {
-        MSG msg;
-
-        while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE))
-        {
-            if (msg.message == WM_QUIT) app.running = false;
-            TranslateMessage(&msg);
-            DispatchMessageA(&msg);
-        }
-
-        if (!app.running) break;
-
-        LARGE_INTEGER now; QueryPerformanceCounter(&now);
-        float dt = static_cast<float>(now.QuadPart - prev.QuadPart) / static_cast<float>(freq.QuadPart);
-        prev = now;
-
-        if (app.dirty) { uploadMesh(app); app.dirty = false; }
-        if (app.autoRotate) app.yaw += dt * 0.35f;
-
-        RECT cr; GetClientRect(hwnd, &cr);
-        int fbw = cr.right - cr.left, fbh = cr.bottom - cr.top;
-        fbh = std::max(fbh, 1);
-        glViewport(0, 0, fbw, fbh);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        Mat4 model = mul(rotateY(app.yaw), rotateX(app.pitch));
-        Mat4 view  = lookAt(Vec3(0, 0, app.dist), Vec3(0, 0, 0), Vec3(0, 1, 0));
-        Mat4 proj  = perspective(45.0f * PI / 180.0f, static_cast<float>(fbw) / static_cast<float>(fbh), 0.1f, 100.0f);
-        Mat4 mv    = mul(view, model);
-
-        float nmat[9];
-    	mat3from(mv, nmat);
-
-        glUseProgram(prog);
-        glUniformMatrix4fv(uModel, 1, GL_FALSE, model.m);
-        glUniformMatrix4fv(uView,  1, GL_FALSE, view.m);
-        glUniformMatrix4fv(uProj,  1, GL_FALSE, proj.m);
-        glUniformMatrix3fv(uNMat,  1, GL_FALSE, nmat);
-        glUniform1i(uHueAxis, app.hueAxis);
-        glUniform1f(uHueScl,  app.hueScale);
-        glUniform1f(uTwist,   app.twist);
-        glUniform1f(uGridU,   app.gridU);
-        glUniform1f(uGridV,   app.gridV);
-        glUniform1i(uWire,    app.wire ? 1 : 0);
-
-        glBindVertexArray(gVAO);
-        glDrawElements(GL_TRIANGLES, app.indexCount, GL_UNSIGNED_INT, 0);
-
-        SwapBuffers(dc);
+    int exitCode = 0;
+    try {
+        const GlContext gl(window);
+        SurfaceRenderer renderer;
+        ShowWindow(window, showCommand);
+        updateTitle(window, app);
+        runFrameLoop(window, app, gl, renderer);
+    } catch (const std::exception& error) {
+        MessageBoxA(nullptr, error.what(), "Surfaces", MB_ICONERROR);
+        exitCode = 1;
     }
-
-    wglMakeCurrent(nullptr, nullptr);
-    wglDeleteContext(rc);
-    ReleaseDC(hwnd, dc);
-    return 0;
+    DestroyWindow(window);   // after the renderer and the context are gone
+    return exitCode;
 }

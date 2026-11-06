@@ -15,15 +15,30 @@
     <ClCompile Include="src\main_win32.cpp">
       <Filter>Source</Filter>
     </ClCompile>
+    <ClCompile Include="src\gl_context.cpp">
+      <Filter>Source</Filter>
+    </ClCompile>
+    <ClCompile Include="src\renderer.cpp">
+      <Filter>Source</Filter>
+    </ClCompile>
+    <ClCompile Include="src\surfaces.cpp">
+      <Filter>Source</Filter>
+    </ClCompile>
     <ClCompile Include="extern\glad\src\gl.c">
       <Filter>glad</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClInclude Include="src\math3d.h">
+    <ClInclude Include="src\gl_context.h">
+      <Filter>Header</Filter>
+    </ClInclude>
+    <ClInclude Include="src\renderer.h">
       <Filter>Header</Filter>
     </ClInclude>
     <ClInclude Include="src\surfaces.h">
+      <Filter>Header</Filter>
+    </ClInclude>
+    <ClInclude Include="src\math3d.h">
       <Filter>Header</Filter>
     </ClInclude>
     <ClInclude Include="extern\glad\include\glad\gl.h">

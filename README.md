@@ -19,7 +19,7 @@ look, not mathematical depth: switch surfaces, spin them, tweak the colours.
 
 | key | surface      | what it is                                                        |
 |-----|--------------|-------------------------------------------------------------------|
-| 1   | Torus Knot   | (p,q) knot swept as a tube along a rotation-minimizing frame       |
+| 1   | Torus Knot   | (p,q) knot swept as a tube along a rotation-minimizing frame; a torus link of gcd(p,q) tubes when p and q share a factor |
 | 2   | Seashell     | logarithmic snail shell                                            |
 | 3   | Klein Bottle | figure-8 immersion                                                |
 | 4   | Dini         | twisted pseudosphere                                              |
@@ -34,16 +34,18 @@ look, not mathematical depth: switch surfaces, spin them, tweak the colours.
 - The wireframe is computed from UV coordinates in the fragment shader, anti-aliased
   with `fwidth`, so line density is independent of tessellation.
 - 4x MSAA. Every surface is auto-centered and scaled to the same view box.
+- Per-monitor DPI aware: renders at the display's native resolution. The window
+  opens at 1920 x 1080 (at 100% scaling) and shrinks to fit smaller screens.
 - Normals: analytic (radial) for the knot tube, finite differences of the
   parametric map for the rest.
 
 Adding a surface is one `evalX(u, v)` function in `src/surfaces.h` plus an entry in
-the enum, `surfaceInfo()`, `evalParam()`, and one key case in `src/main_win32.cpp`.
+the enum, `surfaceInfo()` and `buildMesh()` (`src/surfaces.cpp`). The number keys
+follow the order of the enum.
 
-The math layer (`src/math3d.h` and the surface eval in `src/surfaces.h`) is
-`constexpr` and `[[nodiscard]]` throughout, with compile-time `static_assert`
-checks on the algebraic primitives. It builds as C++26 (`/std:c++latest`); the
-`<cmath>`-based helpers stay `constexpr` via relaxed constexpr (P2448) and become
+The math layer (`src/math3d.h` and the surface functions in `src/surfaces.h`) is
+`constexpr` and `[[nodiscard]]` throughout. It builds as C++26 (`/std:c++latest`);
+the `<cmath>`-based helpers stay `constexpr` via relaxed constexpr (P2448) and become
 constant-evaluable once the toolchain ships constexpr `<cmath>` (P1383), with no
 source change.
 
@@ -51,38 +53,43 @@ source change.
 
 Open `Surfaces.slnx` in Visual Studio, pick `Release | x64`, build and run. Links
 only the system `opengl32` / `gdi32` / `user32`. The window and GL 3.3 core context
-are created directly with Win32 + WGL (`src/main_win32.cpp`); the GL loader (glad)
+are created directly with Win32 + WGL (`src/gl_context.cpp`); the GL loader (glad)
 is vendored under `extern/glad`, so there is nothing to install, no vcpkg and no
 NuGet.
 
 Built as C++26 (`/std:c++latest`) with the `v145` toolset (Visual Studio 2026).
 On an older Visual Studio, retarget the platform toolset when prompted; the code
 itself only relies on library features available up to C++23 (`std::format`,
-`std::span`, `std::numbers`, relaxed constexpr), so `/std:c++latest` on VS 2022
-17.x works too.
+`std::span`, `std::numbers`, `std::unreachable`, relaxed constexpr), so
+`/std:c++latest` on VS 2022 17.x works too.
 
 ## Controls
 
 | input         | action                                             |
 |---------------|----------------------------------------------------|
-| 1 - 6         | switch surface                                     |
+| 1 - 6         | switch surface (main keys or number pad)           |
 | mouse drag    | rotate                                             |
 | scroll        | zoom                                               |
 | Space         | toggle auto-rotate                                 |
-| G             | toggle wireframe                                    |
+| G             | toggle wireframe                                   |
 | `[` `]`       | colour twist                                       |
-| `-` `=`       | colour band count                                  |
-| arrows        | torus knot p and q                                 |
+| `-` `=`       | colour band count (`+` works too)                  |
+| arrows        | torus knot: left/right p, down/up q (1 to 16)      |
 | `;` `'`       | torus knot tube radius                             |
-| R             | reset                                              |
+| R             | reset the view, the knot and the colours           |
 | F11 / Esc     | fullscreen / quit                                  |
+
+The punctuation keys are read as the characters they type, so they work with any
+keyboard layout.
 
 ## Layout
 
 ```
 Surfaces.slnx / Surfaces.vcxproj   Visual Studio project (Win32 + WGL)
-src/main_win32.cpp                 Win32 + WGL platform layer
-src/surfaces.h                     surface eval + mesh generation (no GL)
+src/main_win32.cpp                 window, input, frame loop
+src/gl_context.h/.cpp              OpenGL 3.3 core context via WGL, 4x MSAA
+src/renderer.h/.cpp                shaders, mesh buffers, drawing
+src/surfaces.h/.cpp                surface eval + mesh generation (no GL)
 src/math3d.h                       small constexpr vec3 / mat4 (no dependencies)
 extern/glad/                       vendored OpenGL 3.3 core loader
 ```
